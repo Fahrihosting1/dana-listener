@@ -19,59 +19,66 @@ class DanaNotificationService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "DanaListener"
-        // Package name app DANA di Android
-        private const val DANA_PACKAGE = "id.dana"
-        // Kata kunci notif pembayaran masuk DANA Bisnis
-        private val KEYWORDS = listOf("Pembayaran Masuk", "diterima DANA Bisnis", "pembayaran diterima")
-        // Regex extract nominal Rp
+
+        private val SUPPORTED_APPS = mapOf(
+            "id.dana" to "DANA Bisnis",
+            "com.gojek.gopay.merchant" to "GoPay Merchant",
+            "com.go-jek.gopay.merchant" to "GoPay Merchant",
+            "com.gojek.merchant" to "GoPay Merchant"
+        )
+
+        private val KEYWORDS = mapOf(
+            "id.dana" to listOf(
+                "Pembayaran Masuk",
+                "diterima DANA Bisnis",
+                "pembayaran diterima"
+            ),
+            "gopay" to listOf(
+                "Pembayaran QRIS statis diterima",
+                "Pembayaran diterima",
+                "pembayaran masuk",
+                "QRIS diterima"
+            )
+        )
+
         private val AMOUNT_REGEX = Regex("""Rp[\s]?([\d.,]+)""")
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        // Filter: hanya proses notif dari app DANA
-        if (sbn.packageName != DANA_PACKAGE) return
+        val pkg = sbn.packageName
+
+        val appName = SUPPORTED_APPS[pkg]
+            ?: if (pkg.contains("gopay") || pkg.contains("gojek")) "GoPay Merchant"
+            else return
 
         val extras = sbn.notification.extras
         val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
-
         val fullText = "$title $text $bigText"
-        Log.d(TAG, "Notif DANA: $fullText")
 
-        // Filter: hanya proses notif pembayaran masuk
-        val isPembayaranMasuk = KEYWORDS.any { keyword ->
-            fullText.contains(keyword, ignoreCase = true)
-        }
-        if (!isPembayaranMasuk) return
+        val keywords = if (pkg == "id.dana") KEYWORDS["id.dana"]!! else KEYWORDS["gopay"]!!
+        val isPembayaran = keywords.any { fullText.contains(it, ignoreCase = true) }
+        if (!isPembayaran) return
 
-        // Extract nominal
         val amountMatch = AMOUNT_REGEX.find(fullText)
-        val rawAmount = amountMatch?.groupValues?.get(1) ?: run {
-            Log.w(TAG, "Gak bisa extract nominal dari: $fullText")
-            return
-        }
-
-        // Bersihkan nominal: hapus titik/koma pemisah ribuan
+        val rawAmount = amountMatch?.groupValues?.get(1) ?: return
         val amount = rawAmount.replace(".", "").replace(",", "")
 
-        Log.d(TAG, "Pembayaran masuk: Rp$amount | Teks: $fullText")
-        addLog("💰 Rp$amount detected — posting ke server...")
+        addLog("💰 [$appName] Rp$amount detected — posting ke server...")
 
-        // Kirim ke webhook di background thread
         Thread {
-            postToWebhook(amount, fullText, sbn.postTime)
+            postToWebhook(amount, appName, fullText, sbn.postTime)
         }.start()
     }
 
-    private fun postToWebhook(amount: String, rawNotification: String, timestamp: Long) {
+    private fun postToWebhook(amount: String, source: String, rawNotification: String, timestamp: Long) {
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
         val webhookUrl = prefs.getString("webhook_url", "") ?: ""
         val secret = prefs.getString("webhook_secret", "") ?: ""
 
         if (webhookUrl.isEmpty()) {
-            Log.e(TAG, "Webhook URL belum diisi!")
-            addLog("❌ Error: Webhook URL belum diisi di app")
+            addLog("❌ Error: Webhook URL belum diisi")
             return
         }
 
@@ -87,7 +94,7 @@ class DanaNotificationService : NotificationListenerService() {
 
             val payload = JSONObject().apply {
                 put("amount", amount)
-                put("sender", "DANA Bisnis")
+                put("sender", source)
                 put("timestamp", timestamp)
                 put("raw_notification", rawNotification)
             }
@@ -97,29 +104,24 @@ class DanaNotificationService : NotificationListenerService() {
             writer.flush()
             writer.close()
 
-            val responseCode = conn.responseCode
             val response = conn.inputStream.bufferedReader().readText()
-
-            Log.d(TAG, "Response: $responseCode — $response")
-
             val status = JSONObject(response).optString("status", "unknown")
+
             when (status) {
                 "matched" -> {
                     val orderId = JSONObject(response).optString("order_id", "-")
-                    addLog("✅ AUTO-ACC! Order $orderId — Rp$amount")
-                    showLocalNotif("✅ Auto-ACC Berhasil", "Order $orderId — Rp$amount di-acc otomatis!")
+                    addLog("✅ AUTO-ACC! Order $orderId — Rp$amount [$source]")
+                    showLocalNotif("✅ Auto-ACC Berhasil", "[$source] Rp$amount")
                 }
                 "unmatched" -> {
-                    addLog("⚠️ Unmatched Rp$amount — gak ada order pending")
-                    showLocalNotif("⚠️ Pembayaran Unmatched", "Rp$amount masuk tapi gak ada order pending!")
+                    addLog("⚠️ Unmatched Rp$amount [$source]")
+                    showLocalNotif("⚠️ Unmatched", "[$source] Rp$amount — gak ada order pending")
                 }
-                "duplicate-ignored" -> addLog("🔁 Duplikat diabaikan — Rp$amount")
-                else -> addLog("❓ Response: $status — Rp$amount")
+                "duplicate-ignored" -> addLog("🔁 Duplikat — Rp$amount [$source]")
+                else -> addLog("❓ $status — Rp$amount [$source]")
             }
-
             conn.disconnect()
         } catch (e: Exception) {
-            Log.e(TAG, "Error posting webhook: ${e.message}")
             addLog("❌ Error: ${e.message}")
         }
     }
@@ -129,7 +131,7 @@ class DanaNotificationService : NotificationListenerService() {
         val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         val time = sdf.format(Date())
         val existing = prefs.getString("logs", "") ?: ""
-        val lines = existing.split("\n").take(19) // keep last 20 lines
+        val lines = existing.split("\n").take(19)
         val newLog = "[$time] $message\n" + lines.joinToString("\n")
         prefs.edit().putString("logs", newLog).apply()
     }
@@ -137,27 +139,19 @@ class DanaNotificationService : NotificationListenerService() {
     private fun showLocalNotif(title: String, message: String) {
         val channelId = "dana_listener"
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "DANA Listener", NotificationManager.IMPORTANCE_HIGH)
-            nm.createNotificationChannel(channel)
+            nm.createNotificationChannel(NotificationChannel(channelId, "DANA Listener", NotificationManager.IMPORTANCE_HIGH))
         }
-
         val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
-                .setContentTitle(title)
-                .setContentText(message)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
+                .setContentTitle(title).setContentText(message)
+                .setSmallIcon(android.R.drawable.ic_dialog_info).build()
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
-                .setContentTitle(title)
-                .setContentText(message)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
+                .setContentTitle(title).setContentText(message)
+                .setSmallIcon(android.R.drawable.ic_dialog_info).build()
         }
-
         nm.notify(System.currentTimeMillis().toInt(), notif)
     }
 }
