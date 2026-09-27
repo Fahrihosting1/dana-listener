@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -47,7 +48,7 @@ class DanaNotificationService : NotificationListenerService() {
             )
         )
 
-        private val AMOUNT_REGEX = Regex("""Rp[\s]?([\d.,]+)""")
+        private val AMOUNT_REGEX = Regex("""Rp\s*([\d.,]+)""")
     }
 
     // =============================================
@@ -78,11 +79,10 @@ class DanaNotificationService : NotificationListenerService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Auto-restart kalau service mati
-        val restartIntent = Intent(applicationContext, BootReceiver::class.java)
-        restartIntent.action = "RESTART_SERVICE"
-        sendBroadcast(restartIntent)
-        addLog("⚠️ Service mati — mencoba restart...")
+        // JANGAN kirim broadcast restart manual!
+        // NotificationListenerService dimanage sistem Android, bukan kita.
+        // requestRebind() di onListenerDisconnected() sudah cukup.
+        addLog("⚠️ Service mati — Android akan reconnect otomatis")
     }
 
     private fun startForegroundNotif() {
@@ -169,7 +169,10 @@ class DanaNotificationService : NotificationListenerService() {
 
         val amountMatch = AMOUNT_REGEX.find(fullText)
         val rawAmount = amountMatch?.groupValues?.get(1) ?: return
+        // Format DANA: Rp50.000 atau Rp1.500.000 (titik = ribuan, bukan desimal)
+        // Hapus semua titik dan koma agar jadi angka bulat
         val amount = rawAmount.replace(".", "").replace(",", "")
+        if (amount.isEmpty() || amount == "0") return
 
         addLog("💰 [$appName] Rp$amount detected — posting ke server...")
 
@@ -190,6 +193,11 @@ class DanaNotificationService : NotificationListenerService() {
             addLog("❌ Error: Webhook URL belum diisi di app")
             return
         }
+
+        // WakeLock: cegah CPU tidur saat HTTP request berlangsung
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DanaListener:webhook")
+        wakeLock.acquire(30_000L) // max 30 detik
 
         try {
             val url = URL(webhookUrl)
@@ -213,7 +221,16 @@ class DanaNotificationService : NotificationListenerService() {
             writer.flush()
             writer.close()
 
-            val response = conn.inputStream.bufferedReader().readText()
+            val responseCode = conn.responseCode
+            val responseStream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
+            val response = responseStream?.bufferedReader()?.readText() ?: ""
+
+            if (responseCode !in 200..299) {
+                addLog("❌ Server error $responseCode — Rp$amount [$source]")
+                conn.disconnect()
+                return
+            }
+
             val status = JSONObject(response).optString("status", "unknown")
 
             when (status) {
@@ -235,6 +252,8 @@ class DanaNotificationService : NotificationListenerService() {
         } catch (e: Exception) {
             Log.e(TAG, "Error: ${e.message}")
             addLog("❌ Error: ${e.message}")
+        } finally {
+            if (wakeLock.isHeld) wakeLock.release()
         }
     }
 
