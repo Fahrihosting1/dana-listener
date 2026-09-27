@@ -71,19 +71,24 @@ class MainActivity : AppCompatActivity() {
         updateStatus(tvStatus, tvLog)
     }
 
+    private fun isBatteryOptimizationActive(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return false
+        }
+        return try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            !pm.isIgnoringBatteryOptimizations(packageName)
+        } catch (ex: Exception) {
+            false
+        }
+    }
+
     private fun updateStatus(tvStatus: TextView, tvLog: TextView) {
         try {
             val notifEnabled = NotificationManagerCompat.getEnabledListenerPackages(this)
                 .contains(packageName)
 
-            val batteryOptimized = try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    val pm = getSystemService(POWER_SERVICE) as PowerManager
-                    !pm.isIgnoringBatteryOptimizations(packageName)
-                } else {
-                    false
-                }
-            } catch (ex: Exception) { false }
+            val batteryOptimized: Boolean = isBatteryOptimizationActive()
 
             val statusText = StringBuilder()
             if (notifEnabled) {
