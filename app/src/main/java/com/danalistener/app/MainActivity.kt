@@ -77,7 +77,8 @@ class MainActivity : AppCompatActivity() {
         }
         return try {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
-            !pm.isIgnoringBatteryOptimizations(packageName)
+            val isIgnoring = pm.isIgnoringBatteryOptimizations(packageName)
+            isIgnoring.not()
         } catch (ex: Exception) {
             false
         }
