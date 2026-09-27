@@ -76,10 +76,14 @@ class MainActivity : AppCompatActivity() {
             val notifEnabled = NotificationManagerCompat.getEnabledListenerPackages(this)
                 .contains(packageName)
 
-            val batteryOptimized = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val pm = getSystemService(POWER_SERVICE) as PowerManager
-                !pm.isIgnoringBatteryOptimizations(packageName)
-            } else false
+            val batteryOptimized = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    val pm = getSystemService(POWER_SERVICE) as PowerManager
+                    !pm.isIgnoringBatteryOptimizations(packageName)
+                } else {
+                    false
+                }
+            } catch (ex: Exception) { false }
 
             val statusText = StringBuilder()
             if (notifEnabled) {
