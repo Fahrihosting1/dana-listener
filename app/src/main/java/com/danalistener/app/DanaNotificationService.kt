@@ -59,7 +59,21 @@ class DanaNotificationService : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
-        startForegroundService()
+        createNotificationChannels()
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        // Dipanggil saat service berhasil connect ke system
+        // Ini tempat yang bener buat startForeground di NotificationListenerService
+        startForegroundNotif()
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        addLog("⚠️ Listener disconnect — mencoba reconnect...")
+        // Minta Android reconnect service
+        requestRebind(android.content.ComponentName(this, DanaNotificationService::class.java))
     }
 
     override fun onDestroy() {
@@ -71,7 +85,7 @@ class DanaNotificationService : NotificationListenerService() {
         addLog("⚠️ Service mati — mencoba restart...")
     }
 
-    private fun startForegroundService() {
+    private fun startForegroundNotif() {
         createNotificationChannels()
 
         val openAppIntent = Intent(this, MainActivity::class.java)
