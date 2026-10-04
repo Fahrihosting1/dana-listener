@@ -1,147 +1,161 @@
 package com.danalistener.app
 
 import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import org.json.JSONObject
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.*
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class DanaNotificationService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "DanaListener"
         private const val FOREGROUND_NOTIF_ID = 1001
-        private const val FOREGROUND_CHANNEL_ID = "dana_foreground"
-        private const val RESULT_CHANNEL_ID = "dana_result"
 
-        private val SUPPORTED_APPS = mapOf(
-            "id.dana" to "DANA Bisnis",
-            "com.gojek.gopay.merchant" to "GoPay Merchant",
-            "com.go-jek.gopay.merchant" to "GoPay Merchant",
-            "com.gojek.merchant" to "GoPay Merchant"
+        /** Notif yang masih nongol di status bar & umurnya <= ini akan dikirim otomatis saat catch-up. */
+        private const val CATCHUP_WINDOW_MS = 15 * 60 * 1000L
+
+        /** Dipakai MainActivity buat cek status & trigger scan manual. */
+        @Volatile var instance: DanaNotificationService? = null
+
+        private val DANA_KEYWORDS = listOf(
+            "pembayaran masuk",
+            "diterima dana bisnis",
+            "pembayaran diterima"
+        )
+        private val GOPAY_KEYWORDS = listOf(
+            "pembayaran qris statis diterima",
+            "pembayaran diterima",
+            "pembayaran masuk",
+            "qris diterima"
         )
 
-        private val KEYWORDS = mapOf(
-            "id.dana" to listOf(
-                "Pembayaran Masuk",
-                "diterima DANA Bisnis",
-                "pembayaran diterima"
-            ),
-            "gopay" to listOf(
-                "Pembayaran QRIS statis diterima",
-                "Pembayaran diterima",
-                "pembayaran masuk",
-                "QRIS diterima"
-            )
-        )
+        // "Rp55.000", "Rp 55.000", "Rp55.000,00", "Rp1.500.000"
+        private val AMOUNT_REGEX = Regex("""(?i)Rp\.?\s*(\d[\d.,]*)""")
 
-        private val AMOUNT_REGEX = Regex("""Rp\s*([\d.,]+)""")
+        fun isDana(pkg: String) = pkg == "id.dana" || pkg.startsWith("id.dana.")
+
+        fun appNameFor(pkg: String): String? = when {
+            isDana(pkg) -> "DANA Bisnis"
+            pkg.contains("gopay") || pkg.contains("gojek") -> "GoPay Merchant"
+            else -> null
+        }
+
+        /**
+         * Normalisasi nominal jadi angka bulat tanpa pemisah.
+         *  "55.000" -> "55000", "55.000,00" -> "55000", "1,500,000" -> "1500000"
+         * (Versi lama: ",00" ikut kehapus jadi angka → 55.000,00 kebaca 5.500.000!)
+         */
+        fun normalizeAmount(raw: String): String? {
+            val s = raw.trimEnd('.', ',')
+            if (s.isEmpty()) return null
+            val lastComma = s.lastIndexOf(',')
+            val lastDot = s.lastIndexOf('.')
+            val decIdx = when {
+                lastComma > lastDot && s.length - lastComma - 1 in 1..2 -> lastComma
+                lastDot > lastComma && s.length - lastDot - 1 in 1..2 -> lastDot
+                else -> -1
+            }
+            val intPart = if (decIdx >= 0) s.substring(0, decIdx) else s
+            val digits = intPart.filter { it.isDigit() }.trimStart('0')
+            return if (digits.isEmpty()) null else digits
+        }
+
+        /** Gabung semua field teks notif + normalisasi spasi aneh (NBSP dll). */
+        fun extractText(n: Notification): String {
+            val e = n.extras
+            val parts = mutableListOf<CharSequence?>()
+            // getCharSequence, BUKAN getString: judul berupa SpannableString bikin getString() return null
+            parts += e.getCharSequence(Notification.EXTRA_TITLE)
+            parts += e.getCharSequence(Notification.EXTRA_TEXT)
+            parts += e.getCharSequence(Notification.EXTRA_BIG_TEXT)
+            parts += e.getCharSequence(Notification.EXTRA_SUB_TEXT)
+            parts += e.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)
+            e.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.forEach { parts += it }
+            parts += n.tickerText
+            return parts.mapNotNull { it?.toString() }
+                .distinct()
+                .joinToString(" ")
+                .replace(Regex("[\\u00A0\\u202F\\u2007\\u2009]"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
     }
 
+    private var pool: ExecutorService = Executors.newCachedThreadPool()
+
     // =============================================
-    // FOREGROUND SERVICE — biar gak di-kill Android
+    // LIFECYCLE
     // =============================================
-    override fun onBind(intent: Intent?): IBinder? {
-        return super.onBind(intent)
-    }
+    override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannels()
+        Notifier.ensureChannels(this)
+        if (pool.isShutdown) pool = Executors.newCachedThreadPool()
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        // Dipanggil saat service berhasil connect ke system
-        // Ini tempat yang bener buat startForeground di NotificationListenerService
+        instance = this
+        Store.log(this, "🟢 Listener terhubung ke sistem")
         startForegroundNotif()
+        // Catch-up: ambil notif yang muncul pas listener lagi putus
+        pool.execute { scanActive() }
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
-        addLog("⚠️ Listener disconnect — mencoba reconnect...")
-        // Minta Android reconnect service
-        requestRebind(android.content.ComponentName(this, DanaNotificationService::class.java))
+        instance = null
+        Store.log(this, "⚠️ Listener disconnect — mencoba reconnect...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                requestRebind(ComponentName(this, DanaNotificationService::class.java))
+            } catch (e: Exception) {
+                Store.log(this, "❌ requestRebind gagal: ${e.message}")
+            }
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // JANGAN kirim broadcast restart manual!
-        // NotificationListenerService dimanage sistem Android, bukan kita.
-        // requestRebind() di onListenerDisconnected() sudah cukup.
-        addLog("⚠️ Service mati — Android akan reconnect otomatis")
+        instance = null
+        pool.shutdown()
+        Store.log(this, "⚠️ Service mati — Android akan reconnect otomatis")
     }
 
     private fun startForegroundNotif() {
-        createNotificationChannels()
-
-        val openAppIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, openAppIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, FOREGROUND_CHANNEL_ID)
-                .setContentTitle("💰 DANA Listener Aktif")
-                .setContentText("Memantau pembayaran masuk...")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentIntent(pendingIntent)
-                .setOngoing(true) // gak bisa di-swipe
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
+        // Jangan sampai gagal start foreground bikin listener ikut crash
+        try {
+            Notifier.ensureChannels(this)
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, Notifier.FOREGROUND_CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+            val notification = builder
                 .setContentTitle("💰 DANA Listener Aktif")
                 .setContentText("Memantau pembayaran masuk...")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build()
-        }
-
-        startForeground(FOREGROUND_NOTIF_ID, notification)
-        Log.d(TAG, "Foreground service started")
-    }
-
-    private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-            // Channel foreground (low importance — gak bunyi)
-            val foregroundChannel = NotificationChannel(
-                FOREGROUND_CHANNEL_ID,
-                "DANA Listener Status",
-                NotificationManager.IMPORTANCE_LOW // silent, gak ganggu
-            ).apply {
-                description = "Status service DANA Listener"
-                setShowBadge(false)
-            }
-
-            // Channel hasil transaksi (high importance — bunyi)
-            val resultChannel = NotificationChannel(
-                RESULT_CHANNEL_ID,
-                "Notifikasi Pembayaran",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notifikasi pembayaran masuk"
-            }
-
-            nm.createNotificationChannel(foregroundChannel)
-            nm.createNotificationChannel(resultChannel)
+            startForeground(FOREGROUND_NOTIF_ID, notification)
+            Log.d(TAG, "Foreground service started")
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground gagal: ${e.message}")
+            Store.log(this, "⚠️ Foreground notif gagal: ${e.message}")
         }
     }
 
@@ -149,145 +163,83 @@ class DanaNotificationService : NotificationListenerService() {
     // LISTENER NOTIFIKASI
     // =============================================
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val pkg = sbn.packageName
-
-        val appName = SUPPORTED_APPS[pkg]
-            ?: if (pkg.contains("gopay") || pkg.contains("gojek")) "GoPay Merchant"
-            else return
-
-        val extras = sbn.notification.extras
-        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
-        val fullText = "$title $text $bigText"
-
-        Log.d(TAG, "Notif dari $appName: $fullText")
-
-        val keywords = if (pkg == "id.dana") KEYWORDS["id.dana"]!! else KEYWORDS["gopay"]!!
-        val isPembayaran = keywords.any { fullText.contains(it, ignoreCase = true) }
-        if (!isPembayaran) return
-
-        val amountMatch = AMOUNT_REGEX.find(fullText)
-        val rawAmount = amountMatch?.groupValues?.get(1) ?: return
-        // Format DANA: Rp50.000 atau Rp1.500.000 (titik = ribuan, bukan desimal)
-        // Hapus semua titik dan koma agar jadi angka bulat
-        val amount = rawAmount.replace(".", "").replace(",", "")
-        if (amount.isEmpty() || amount == "0") return
-
-        addLog("💰 [$appName] Rp$amount detected — posting ke server...")
-
-        Thread {
-            postToWebhook(amount, appName, fullText, sbn.postTime)
-        }.start()
-    }
-
-    // =============================================
-    // POST KE WEBHOOK
-    // =============================================
-    private fun postToWebhook(amount: String, source: String, rawNotification: String, timestamp: Long) {
-        val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
-        val webhookUrl = prefs.getString("webhook_url", "") ?: ""
-        val secret = prefs.getString("webhook_secret", "") ?: ""
-
-        if (webhookUrl.isEmpty()) {
-            addLog("❌ Error: Webhook URL belum diisi di app")
-            return
-        }
-
-        // WakeLock: cegah CPU tidur saat HTTP request berlangsung
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DanaListener:webhook")
-        wakeLock.acquire(30_000L) // max 30 detik
-
         try {
-            val url = URL(webhookUrl)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("x-webhook-secret", secret)
-            conn.doOutput = true
-            conn.connectTimeout = 10000
-            conn.readTimeout = 10000
-
-            val payload = JSONObject().apply {
-                put("amount", amount)
-                put("sender", source)
-                put("timestamp", timestamp)
-                put("raw_notification", rawNotification)
-            }
-
-            val writer = OutputStreamWriter(conn.outputStream)
-            writer.write(payload.toString())
-            writer.flush()
-            writer.close()
-
-            val responseCode = conn.responseCode
-            val responseStream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
-            val response = responseStream?.bufferedReader()?.readText() ?: ""
-
-            if (responseCode !in 200..299) {
-                addLog("❌ Server error $responseCode — Rp$amount [$source]")
-                conn.disconnect()
-                return
-            }
-
-            val status = JSONObject(response).optString("status", "unknown")
-
-            when (status) {
-                "matched", "success" -> {
-                    val orderId = JSONObject(response).optString("order_id",
-                        JSONObject(response).optString("id", "-"))
-                    addLog("✅ SUKSES! $orderId — Rp$amount [$source]")
-                    showResultNotif("✅ Pembayaran Berhasil", "[$source] Rp$amount diterima!")
-                }
-                "unmatched" -> {
-                    addLog("⚠️ Unmatched Rp$amount [$source]")
-                    showResultNotif("⚠️ Pembayaran Unmatched", "Rp$amount masuk tapi gak ada order pending!")
-                }
-                "duplicate-ignored" -> addLog("🔁 Duplikat — Rp$amount [$source]")
-                else -> addLog("❓ $status — Rp$amount [$source]")
-            }
-            conn.disconnect()
-
+            handle(sbn, fromScan = false)
         } catch (e: Exception) {
-            Log.e(TAG, "Error: ${e.message}")
-            addLog("❌ Error: ${e.message}")
-        } finally {
-            if (wakeLock.isHeld) wakeLock.release()
+            // Exception di sini tidak boleh lolos — bisa bikin listener mati diam-diam
+            Log.e(TAG, "handle error: ${e.message}", e)
+            Store.log(this, "❌ Error proses notif: ${e.message}")
         }
     }
 
-    // =============================================
-    // HELPER
-    // =============================================
-    private fun addLog(message: String) {
-        val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
-        val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-        val time = sdf.format(Date())
-        val existing = prefs.getString("logs", "") ?: ""
-        val lines = existing.split("\n").take(19)
-        val newLog = "[$time] $message\n" + lines.joinToString("\n")
-        prefs.edit().putString("logs", newLog).apply()
+    /**
+     * Scan notif yang masih ada di status bar. Notif DANA/GoPay yang cocok & masih baru
+     * dikirim otomatis; sisanya dicatat ke riwayat supaya bisa dikirim manual.
+     * Return jumlah notif yang diantrikan.
+     */
+    fun scanActive(): Int {
+        val active = try { activeNotifications } catch (e: Exception) { null } ?: return 0
+        var queued = 0
+        for (sbn in active) {
+            try {
+                if (handle(sbn, fromScan = true)) queued++
+            } catch (e: Exception) {
+                Store.log(this, "❌ Error scan notif: ${e.message}")
+            }
+        }
+        return queued
     }
 
-    private fun showResultNotif(title: String, message: String) {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, RESULT_CHANNEL_ID)
-                .setContentTitle(title)
-                .setContentText(message)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setAutoCancel(true)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setContentTitle(title)
-                .setContentText(message)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setAutoCancel(true)
-                .build()
+    /** @return true kalau notif diantrikan untuk dikirim ke webhook. */
+    private fun handle(sbn: StatusBarNotification, fromScan: Boolean): Boolean {
+        val pkg = sbn.packageName ?: return false
+        val appName = appNameFor(pkg) ?: return false
+
+        val text = extractText(sbn.notification)
+        if (text.isEmpty()) return false
+
+        val amount = AMOUNT_REGEX.find(text)?.groupValues?.get(1)?.let { normalizeAmount(it) }
+        // Notif tanpa nominal (promo, dll) tidak kita simpan
+        if (amount == null) {
+            Log.d(TAG, "Notif $appName tanpa nominal: $text")
+            return false
         }
-        nm.notify(System.currentTimeMillis().toInt(), notif)
+
+        val key = "$pkg|${sbn.postTime}|${text.hashCode()}"
+        val now = System.currentTimeMillis()
+        val existing = Store.get(this, key)
+        if (existing != null) {
+            if (existing.state in Store.DONE_STATES) return false
+            if (existing.state == "pending" && now - existing.upd < 120_000) return false
+        }
+
+        Log.d(TAG, "Notif dari $appName: $text")
+
+        val keywords = if (isDana(pkg)) DANA_KEYWORDS else GOPAY_KEYWORDS
+        val lower = text.lowercase()
+        val matched = keywords.any { lower.contains(it) }
+
+        if (!matched) {
+            if (existing == null) {
+                Store.upsert(this, Store.Rec(key, sbn.postTime, pkg, appName, text, amount, "ignored", now))
+                Store.log(this, "⚠️ Notif $appName Rp$amount TIDAK cocok keyword — \"${text.take(70)}\". Kalau ini transaksi masuk: 🔍 Cek Notif Manual")
+            }
+            return false
+        }
+
+        if (fromScan && now - sbn.postTime > CATCHUP_WINDOW_MS) {
+            if (existing == null) {
+                Store.upsert(this, Store.Rec(key, sbn.postTime, pkg, appName, text, amount, "old", now))
+            }
+            return false
+        }
+
+        val rec = Store.Rec(key, sbn.postTime, pkg, appName, text, amount, "pending", now)
+        Store.upsert(this, rec)
+        Store.log(this, "💰 [$appName] Rp$amount detected${if (fromScan) " (catch-up)" else ""} — posting ke server...")
+
+        val ctx = applicationContext
+        pool.execute { WebhookSender.deliver(ctx, rec, false) }
+        return true
     }
 }
