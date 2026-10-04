@@ -102,6 +102,16 @@
             android:textColor="#FFFFFF"
             android:layout_marginBottom="10dp"/>
 
+        <!-- CEK NOTIF MANUAL -->
+        <Button
+            android:id="@+id/btnManual"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="🔍 Cek Notif Manual"
+            android:backgroundTint="#00838F"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="10dp"/>
+
         <!-- IZIN NOTIFIKASI -->
         <Button
             android:id="@+id/btnPermission"
