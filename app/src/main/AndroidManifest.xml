@@ -66,5 +66,9 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".ScanAlarmReceiver"
+            android:exported="false" />
+
     </application>
 </manifest>
