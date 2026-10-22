@@ -30,7 +30,11 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         startForegroundNotif()
-        showOverlay()
+        // Service ini = penahan proses (foreground service ter-start) supaya ga dibekukan OEM saat layar mati.
+        // Chip overlay cuma digambar kalau user sengaja nyalain.
+        val wantChip = getSharedPreferences("config", MODE_PRIVATE).getBoolean("overlay_on", false)
+        val canDraw = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || android.provider.Settings.canDrawOverlays(this)
+        if (wantChip && canDraw) showOverlay()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -48,8 +52,8 @@ class OverlayService : Service() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val ch = NotificationChannel(
                 OVERLAY_CHANNEL_ID,
-                "DANA Overlay",
-                NotificationManager.IMPORTANCE_MIN   // paling senyap, gak bunyi
+                "DANA Listener Aktif",
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 setShowBadge(false)
                 setSound(null, null)

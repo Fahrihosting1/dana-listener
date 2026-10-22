@@ -2,8 +2,12 @@ package com.danalistener.app
 
 import android.app.Notification
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.os.Build
 import android.os.IBinder
 import android.service.notification.NotificationListenerService
@@ -94,6 +98,13 @@ class DanaNotificationService : NotificationListenerService() {
 
     private var pool: ExecutorService = Executors.newFixedThreadPool(2)
     private val rebindTimes = mutableListOf<Long>()
+    private var screenReg = false
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            // Layar nyala / HP di-unlock → langsung catch-up notif yang sempat kelewat
+            pool.execute { scanActive() }
+        }
+    }
 
     // =============================================
     // LIFECYCLE
@@ -110,7 +121,8 @@ class DanaNotificationService : NotificationListenerService() {
         super.onListenerConnected()
         instance = this
         Store.log(this, "🟢 Listener terhubung ke sistem")
-        startForegroundNotif()
+        startKeepAlive()
+        registerScreenReceiver()
         WatchdogWorker.schedule(applicationContext)
         // Catch-up: ambil notif yang muncul pas listener lagi putus
         pool.execute { scanActive() }
@@ -119,6 +131,7 @@ class DanaNotificationService : NotificationListenerService() {
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         instance = null
+        unregisterScreenReceiver()
         Store.log(this, "⚠️ Listener disconnect — mencoba reconnect...")
         // Anti loop rebind: kalau OEM terus ngekill, jangan spin (bikin panas) — serahkan ke Watchdog
         val now = System.currentTimeMillis()
@@ -140,10 +153,38 @@ class DanaNotificationService : NotificationListenerService() {
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+        unregisterScreenReceiver()
         pool.shutdown()
         Store.log(this, "⚠️ Service mati — Android akan reconnect otomatis")
     }
 
+    /** Start foreground service beneran (OverlayService) — penahan proses biar ga dibekukan pas layar mati. */
+    private fun startKeepAlive() {
+        try {
+            ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java))
+        } catch (e: Exception) {
+            Store.log(this, "⚠️ Keep-alive service gagal start: ${e.message}")
+        }
+    }
+
+    private fun registerScreenReceiver() {
+        if (screenReg) return
+        try {
+            val f = IntentFilter(Intent.ACTION_SCREEN_ON).apply { addAction(Intent.ACTION_USER_PRESENT) }
+            ContextCompat.registerReceiver(this, screenReceiver, f, ContextCompat.RECEIVER_NOT_EXPORTED)
+            screenReg = true
+        } catch (e: Exception) {
+            Log.e(TAG, "register screen receiver gagal: ${e.message}")
+        }
+    }
+
+    private fun unregisterScreenReceiver() {
+        if (!screenReg) return
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) { }
+        screenReg = false
+    }
+
+    @Suppress("unused")
     private fun startForegroundNotif() {
         // Jangan sampai gagal start foreground bikin listener ikut crash
         try {

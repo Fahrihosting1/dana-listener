@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
                     // Overlay opsional (default MATI — hemat baterai & ga bikin HP panas). Tap = toggle.
                     val on = !prefs.getBoolean("overlay_on", false)
                     prefs.edit().putBoolean("overlay_on", on).apply()
-                    if (on) startOverlayService() else stopService(Intent(this, OverlayService::class.java))
+                    stopService(Intent(this, OverlayService::class.java)); startOverlayService()
                     Toast.makeText(this, if (on) "Overlay chip AKTIF" else "Overlay chip MATI (hemat baterai)", Toast.LENGTH_SHORT).show()
                     refreshStatus()
                 }
@@ -143,7 +143,7 @@ class MainActivity : AppCompatActivity() {
                 // Android < 6: tidak butuh izin manual
                 val on = !prefs.getBoolean("overlay_on", false)
                 prefs.edit().putBoolean("overlay_on", on).apply()
-                if (on) startOverlayService() else stopService(Intent(this, OverlayService::class.java))
+                stopService(Intent(this, OverlayService::class.java)); startOverlayService()
             }
         }
 
@@ -258,12 +258,8 @@ class MainActivity : AppCompatActivity() {
 
         updateStatus(tvStatus, tvLog)
 
-        // Overlay hanya jalan kalau user sengaja nyalain (opsional)
-        if (prefs.getBoolean("overlay_on", false) && isOverlayGranted()) {
-            startOverlayService()
-        } else {
-            stopService(Intent(this, OverlayService::class.java))
-        }
+        // Keep-alive foreground service selalu jalan (chip overlay hanya muncul kalau dinyalain)
+        startOverlayService()
     }
 
     override fun onResume() {
