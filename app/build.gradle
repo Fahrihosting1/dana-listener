@@ -11,13 +11,17 @@ android {
         applicationId "com.danalistener.app"
         minSdkVersion 21
         targetSdkVersion 34
-        versionCode 2
-        versionName "2.0"
+        versionCode 3
+        versionName "2.1"
     }
 
     buildTypes {
         release {
-            minifyEnabled false
+            // Release = non-debuggable, jauh lebih enteng di CPU dibanding debug (bantu HP low-end ga panas)
+            minifyEnabled true
+            shrinkResources true
+            // Ditandatangani pakai debug key biar tetap bisa diinstall langsung tanpa keystore sendiri
+            signingConfig signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
@@ -35,4 +39,6 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.core:core-ktx:1.9.0'
+    // Retry kirim webhook & watchdog yang tahan proses di-kill / Doze
+    implementation 'androidx.work:work-runtime:2.8.1'
 }
