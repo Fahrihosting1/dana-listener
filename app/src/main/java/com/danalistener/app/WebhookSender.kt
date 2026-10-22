@@ -99,36 +99,55 @@ object WebhookSender {
         }
     }
 
+    /** Dipanggil kalau WorkManager nyerah setelah banyak percobaan. */
+    fun giveUp(ctx: Context, rec: Store.Rec) {
+        val app = ctx.applicationContext
+        Store.setState(app, rec.key, "failed")
+        Store.log(app, "❌ Menyerah kirim Rp${rec.amount} [${rec.app}] setelah banyak percobaan. Kirim ulang lewat 🔍 Cek Notif Manual")
+        Notifier.result(app, "❌ Gagal kirim ke server", "Rp${rec.amount} — buka app → Cek Notif Manual")
+    }
+
     /**
-     * Kirim ke webhook dengan retry (0s, 3s, 10s, 30s) lalu simpan hasilnya ke riwayat.
-     * Blocking — panggil dari background thread. Return state akhir.
+     * Kirim ke webhook lalu simpan hasilnya ke riwayat. Blocking — panggil dari background thread.
+     *
+     * - Percobaan cepat (0s, 3s). Kalau masih gagal & bisa di-retry → state "queued" dan
+     *   diserahkan ke [DeliveryWorker] (WorkManager) — BUKAN Thread.sleep yang ikut mati kalau
+     *   proses di-kill / HP masuk Doze.
+     * - fromWorker=true: cuma 1 percobaan; pemanggil (Worker) yang urus retry via Result.retry().
+     * Return state akhir.
      */
-    fun deliver(ctx: Context, rec: Store.Rec, manual: Boolean): String {
+    fun deliver(ctx: Context, rec: Store.Rec, manual: Boolean, fromWorker: Boolean = false): String {
         val app = ctx.applicationContext
         Store.upsert(app, rec.copy(state = "pending", upd = System.currentTimeMillis()))
 
         val pm = app.getSystemService(Context.POWER_SERVICE) as PowerManager
         val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DanaListener:webhook")
-        wl.acquire(150_000L)
+        wl.acquire(60_000L)
 
         try {
-            val delays = longArrayOf(0, 3_000, 10_000, 30_000)
+            val delays = if (fromWorker || manual) longArrayOf(0) else longArrayOf(0, 3_000)
             var last: Attempt? = null
             for ((i, d) in delays.withIndex()) {
                 if (d > 0) Thread.sleep(d)
                 val r = attempt(app, rec, manual)
                 last = r
                 if (r.ok || !r.retryable) break
-                if (i < delays.size - 1) Store.log(app, "🔄 Gagal kirim Rp${rec.amount} (${r.detail}) — retry ${i + 1}/${delays.size - 1}")
+                if (i < delays.size - 1) Store.log(app, "🔄 Gagal kirim Rp${rec.amount} (${r.detail}) — coba lagi")
             }
             val r = last!!
             val tag = if (manual) " (manual)" else ""
 
             val state: String
             if (!r.ok) {
-                state = "failed"
-                Store.log(app, "❌ Gagal kirim Rp${rec.amount} [${rec.app}]$tag — ${r.detail}. Bisa kirim ulang lewat 🔍 Cek Notif Manual")
-                Notifier.result(app, "❌ Gagal kirim ke server", "Rp${rec.amount} — buka app → Cek Notif Manual")
+                if (r.retryable && !manual) {
+                    state = "queued"
+                    Store.log(app, "⏳ Rp${rec.amount} belum terkirim (${r.detail}) — dicoba lagi otomatis pas internet/server siap")
+                    if (!fromWorker) DeliveryWorker.enqueue(app, rec.key)
+                } else {
+                    state = "failed"
+                    Store.log(app, "❌ Gagal kirim Rp${rec.amount} [${rec.app}]$tag — ${r.detail}. Bisa kirim ulang lewat 🔍 Cek Notif Manual")
+                    Notifier.result(app, "❌ Gagal kirim ke server", "Rp${rec.amount} — buka app → Cek Notif Manual")
+                }
             } else when (r.status) {
                 "matched", "success" -> {
                     state = "sent"

@@ -18,6 +18,7 @@ class BootReceiver : BroadcastReceiver() {
                 // Cukup minta sistem rebind listener-nya.
                 Log.d("DanaListener", "Boot/update: ${intent.action} — rebind listener")
                 rebindListener(context)
+                WatchdogWorker.schedule(context)
             }
         }
     }

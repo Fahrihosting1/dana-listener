@@ -47,6 +47,7 @@ class MainActivity : AppCompatActivity() {
         val btnMiui        = findViewById<Button>(R.id.btnMiui)
         val btnOppo        = findViewById<Button>(R.id.btnOppo)
         val btnVivo        = findViewById<Button>(R.id.btnVivo)
+        val btnTranssion   = findViewById<Button>(R.id.btnTranssion)
         val tvStatus       = findViewById<TextView>(R.id.tvStatus)
         val tvLog          = findViewById<TextView>(R.id.tvLog)
 
@@ -58,6 +59,10 @@ class MainActivity : AppCompatActivity() {
         btnMiui.visibility = if (brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco")) View.VISIBLE else View.GONE
         btnOppo.visibility = if (brand.contains("oppo") || brand.contains("realme") || brand.contains("oneplus")) View.VISIBLE else View.GONE
         btnVivo.visibility = if (brand.contains("vivo")) View.VISIBLE else View.GONE
+        btnTranssion.visibility = if (brand.contains("infinix") || brand.contains("tecno") || brand.contains("itel") || brand.contains("transsion")) View.VISIBLE else View.GONE
+
+        // Watchdog 15 menit: rebind listener + catch-up + retry kirim yang gagal
+        WatchdogWorker.schedule(this)
 
         // ── Simpan config ─────────────────────────────────────────────────
         btnSave.setOnClickListener {
@@ -127,13 +132,18 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } else {
-                    Toast.makeText(this, "✅ Izin overlay sudah aktif!", Toast.LENGTH_SHORT).show()
-                    // Start overlay service setelah izin sudah ada
-                    startOverlayService()
+                    // Overlay opsional (default MATI — hemat baterai & ga bikin HP panas). Tap = toggle.
+                    val on = !prefs.getBoolean("overlay_on", false)
+                    prefs.edit().putBoolean("overlay_on", on).apply()
+                    if (on) startOverlayService() else stopService(Intent(this, OverlayService::class.java))
+                    Toast.makeText(this, if (on) "Overlay chip AKTIF" else "Overlay chip MATI (hemat baterai)", Toast.LENGTH_SHORT).show()
+                    refreshStatus()
                 }
             } else {
                 // Android < 6: tidak butuh izin manual
-                startOverlayService()
+                val on = !prefs.getBoolean("overlay_on", false)
+                prefs.edit().putBoolean("overlay_on", on).apply()
+                if (on) startOverlayService() else stopService(Intent(this, OverlayService::class.java))
             }
         }
 
@@ -230,12 +240,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // ── Infinix / Tecno / itel (Transsion XOS / HiOS) ─────────────────
+        btnTranssion.setOnClickListener {
+            val opened = tryStartActivity(
+                Intent().apply { component = ComponentName("com.transsion.phonemaster", "com.cyin.himgr.autostart.AutoStartActivity") },
+                packageManager.getLaunchIntentForPackage("com.transsion.phonemaster") ?: Intent(),
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+            )
+            Toast.makeText(
+                this,
+                (if (opened) "" else "Gagal buka otomatis. ") +
+                    "Phone Master → Autostart → aktifkan DANA Listener.\nSettings → Baterai → App battery management → DANA Listener → Tanpa batasan. " +
+                    "Kunci app di Recent (tahan kartu app → Lock).",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+
         updateStatus(tvStatus, tvLog)
 
-        // Auto-start overlay kalau izin sudah ada
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            Settings.canDrawOverlays(this)) {
+        // Overlay hanya jalan kalau user sengaja nyalain (opsional)
+        if (prefs.getBoolean("overlay_on", false) && isOverlayGranted()) {
             startOverlayService()
+        } else {
+            stopService(Intent(this, OverlayService::class.java))
         }
     }
 
@@ -245,11 +272,6 @@ class MainActivity : AppCompatActivity() {
         refreshStatus()
         uiHandler.postDelayed(refreshTask, 3000)
 
-        // Kalau user baru balik dari halaman izin overlay, langsung start service
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-            Settings.canDrawOverlays(this)) {
-            startOverlayService()
-        }
     }
 
     override fun onPause() {
@@ -288,6 +310,7 @@ class MainActivity : AppCompatActivity() {
         "dup" -> "🔁 duplikat"
         "failed" -> "❌ gagal kirim"
         "pending" -> "⏳ diproses"
+        "queued" -> "🔄 antri kirim ulang otomatis"
         "ignored" -> "🚫 tdk cocok keyword"
         "old" -> "🕓 lama, belum dikirim"
         else -> state
@@ -429,7 +452,11 @@ class MainActivity : AppCompatActivity() {
             statusText.append(if (notifEnabled) "🟢 Izin notifikasi aktif\n" else "🔴 Izin Notifikasi BELUM diberikan!\n")
             statusText.append(if (connected) "🟢 Listener TERHUBUNG — dengerin notif DANA\n" else "🔴 Listener BELUM terhubung — buka ulang app / matikan-nyalakan izin notifikasi\n")
             statusText.append(if (batteryOptimized) "⚠️ Battery optimization aktif — tap tombol battery\n" else "🟢 Battery optimization nonaktif\n")
-            statusText.append(if (overlayGranted) "🟢 Izin overlay aktif — popup terkunci" else "⚠️ Izin overlay belum diberikan — tap tombol overlay")
+            val overlayOn = getSharedPreferences("config", MODE_PRIVATE).getBoolean("overlay_on", false)
+            statusText.append(
+                if (overlayGranted && overlayOn) "🟡 Overlay chip aktif (opsional, tambah beban baterai)"
+                else "🟢 Overlay chip mati — hemat baterai"
+            )
 
             tvStatus.text = statusText.toString()
             tvStatus.setTextColor(if (notifEnabled && connected) 0xFF00C853.toInt() else 0xFFD50000.toInt())

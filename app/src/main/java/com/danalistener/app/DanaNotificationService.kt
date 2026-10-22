@@ -18,8 +18,12 @@ class DanaNotificationService : NotificationListenerService() {
         private const val TAG = "DanaListener"
         private const val FOREGROUND_NOTIF_ID = 1001
 
-        /** Notif yang masih nongol di status bar & umurnya <= ini akan dikirim otomatis saat catch-up. */
-        private const val CATCHUP_WINDOW_MS = 15 * 60 * 1000L
+        /**
+         * Notif yang umurnya <= ini akan dikirim otomatis saat catch-up / retry
+         * (dulu 15 menit → transaksi yang masuk pas HP tidur lama jadi "old" & hilang).
+         * Server dedupe lewat notif_key & bisa filter pakai "timestamp" di payload.
+         */
+        const val CATCHUP_WINDOW_MS = 60 * 60 * 1000L
 
         /** Dipakai MainActivity buat cek status & trigger scan manual. */
         @Volatile var instance: DanaNotificationService? = null
@@ -88,7 +92,8 @@ class DanaNotificationService : NotificationListenerService() {
         }
     }
 
-    private var pool: ExecutorService = Executors.newCachedThreadPool()
+    private var pool: ExecutorService = Executors.newFixedThreadPool(2)
+    private val rebindTimes = mutableListOf<Long>()
 
     // =============================================
     // LIFECYCLE
@@ -98,7 +103,7 @@ class DanaNotificationService : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         Notifier.ensureChannels(this)
-        if (pool.isShutdown) pool = Executors.newCachedThreadPool()
+        if (pool.isShutdown) pool = Executors.newFixedThreadPool(2)
     }
 
     override fun onListenerConnected() {
@@ -106,6 +111,7 @@ class DanaNotificationService : NotificationListenerService() {
         instance = this
         Store.log(this, "🟢 Listener terhubung ke sistem")
         startForegroundNotif()
+        WatchdogWorker.schedule(applicationContext)
         // Catch-up: ambil notif yang muncul pas listener lagi putus
         pool.execute { scanActive() }
     }
@@ -114,6 +120,14 @@ class DanaNotificationService : NotificationListenerService() {
         super.onListenerDisconnected()
         instance = null
         Store.log(this, "⚠️ Listener disconnect — mencoba reconnect...")
+        // Anti loop rebind: kalau OEM terus ngekill, jangan spin (bikin panas) — serahkan ke Watchdog
+        val now = System.currentTimeMillis()
+        rebindTimes.removeAll { now - it > 60_000 }
+        if (rebindTimes.size >= 3) {
+            Store.log(this, "⏸️ Rebind terlalu sering — ditunda, Watchdog yang lanjutin")
+            return
+        }
+        rebindTimes.add(now)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
                 requestRebind(ComponentName(this, DanaNotificationService::class.java))
@@ -211,6 +225,8 @@ class DanaNotificationService : NotificationListenerService() {
         if (existing != null) {
             if (existing.state in Store.DONE_STATES) return false
             if (existing.state == "pending" && now - existing.upd < 120_000) return false
+            // Lagi diantrikan WorkManager — biarkan dia yang kirim (hindari kirim dobel)
+            if (existing.state == "queued" && now - existing.upd < 15 * 60_000L) return false
         }
 
         Log.d(TAG, "Notif dari $appName: $text")
