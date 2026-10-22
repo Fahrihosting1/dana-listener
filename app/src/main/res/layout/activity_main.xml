@@ -137,7 +137,7 @@
             android:id="@+id/btnOverlay"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="📌 Izinkan Tampil di Atas Layar"
+            android:text="📌 Overlay Chip (opsional, makan baterai)"
             android:backgroundTint="#6A1B9A"
             android:textColor="#FFFFFF"
             android:layout_marginBottom="10dp"/>
@@ -170,6 +170,17 @@
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:text="📱 Vivo: Battery Whitelist"
+            android:backgroundTint="#4A148C"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="10dp"
+            android:visibility="gone"/>
+
+        <!-- TRANSSION (Infinix / Tecno / itel) autostart + battery -->
+        <Button
+            android:id="@+id/btnTranssion"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="📱 Infinix/Tecno/itel: Autostart &amp; Baterai"
             android:backgroundTint="#4A148C"
             android:textColor="#FFFFFF"
             android:layout_marginBottom="24dp"
