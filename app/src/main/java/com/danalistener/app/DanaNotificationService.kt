@@ -10,6 +10,7 @@ import android.content.IntentFilter
 import androidx.core.content.ContextCompat
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -124,6 +125,7 @@ class DanaNotificationService : NotificationListenerService() {
         startKeepAlive()
         registerScreenReceiver()
         WatchdogWorker.schedule(applicationContext)
+        ScanAlarmReceiver.schedule(applicationContext)
         // Catch-up: ambil notif yang muncul pas listener lagi putus
         pool.execute { scanActive() }
     }
@@ -141,13 +143,13 @@ class DanaNotificationService : NotificationListenerService() {
             return
         }
         rebindTimes.add(now)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            try {
-                requestRebind(ComponentName(this, DanaNotificationService::class.java))
-            } catch (e: Exception) {
-                Store.log(this, "❌ requestRebind gagal: ${e.message}")
-            }
+        try {
+            BootReceiver.rebindListener(applicationContext)
+        } catch (e: Exception) {
+            Store.log(this, "❌ rebind gagal: ${e.message}")
         }
+        // Jaring pengaman: alarm tetap dijadwalkan walau proses keburu dibunuh
+        ScanAlarmReceiver.schedule(applicationContext)
     }
 
     override fun onDestroy() {
@@ -218,12 +220,21 @@ class DanaNotificationService : NotificationListenerService() {
     // LISTENER NOTIFIKASI
     // =============================================
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // Tahan CPU tetap nyala sebentar biar proses notif (simpan + antri kirim) kelar walau layar mati
+        var wl: PowerManager.WakeLock? = null
+        try {
+            wl = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DanaListener:posted")
+            wl.acquire(10_000L)
+        } catch (_: Exception) { }
         try {
             handle(sbn, fromScan = false)
         } catch (e: Exception) {
             // Exception di sini tidak boleh lolos — bisa bikin listener mati diam-diam
             Log.e(TAG, "handle error: ${e.message}", e)
             Store.log(this, "❌ Error proses notif: ${e.message}")
+        } finally {
+            try { if (wl?.isHeld == true) wl.release() } catch (_: Exception) { }
         }
     }
 

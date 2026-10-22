@@ -19,6 +19,7 @@ class BootReceiver : BroadcastReceiver() {
                 Log.d("DanaListener", "Boot/update: ${intent.action} — rebind listener")
                 rebindListener(context)
                 WatchdogWorker.schedule(context)
+                ScanAlarmReceiver.schedule(context)
             }
         }
     }

@@ -86,7 +86,12 @@ class OverlayService : Service() {
                 .build()
         }
 
-        startForeground(OVERLAY_NOTIF_ID, notif)
+        try {
+            startForeground(OVERLAY_NOTIF_ID, notif)
+        } catch (e: Exception) {
+            // Jangan sampai crash kalau sistem nolak foreground (mis. Android 12+ dari background)
+            Store.log(this, "⚠️ startForeground ditolak: ${e.message}")
+        }
     }
 
     // ── Overlay chip di pojok atas layar ─────────────────────────────────

@@ -63,6 +63,7 @@ class MainActivity : AppCompatActivity() {
 
         // Watchdog 15 menit: rebind listener + catch-up + retry kirim yang gagal
         WatchdogWorker.schedule(this)
+        ScanAlarmReceiver.schedule(this)
 
         // ── Simpan config ─────────────────────────────────────────────────
         btnSave.setOnClickListener {
